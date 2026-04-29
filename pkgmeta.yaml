@@ -1,0 +1,8 @@
+package-as: Synapse
+
+manual-changelog: CHANGELOG.md
+
+ignore:
+  - pkgmeta.yaml
+  - README.md
+  - .github
