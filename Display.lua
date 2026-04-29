@@ -176,12 +176,12 @@ function SynapseNS.InitDisplay()
         cdTimer = cdTimer + elapsed
         if cdTimer >= COOLDOWN_REFRESH_SEC then
             cdTimer = 0
-            local start, duration, enable = GetCurrentCooldown()
-            if duration and duration > 0.5 then
-                cooldownFrame:SetCooldown(start, duration)
-            else
-                cooldownFrame:Clear()
-            end
+            local start, duration = GetCurrentCooldown()
+            -- Avoid comparing secret values returned by GetActionCooldown —
+            -- they are taint-protected and cannot be used with > / < in addon
+            -- code.  SetCooldown accepts secret values directly; passing 0, 0
+            -- is equivalent to Clear() when no cooldown is active.
+            cooldownFrame:SetCooldown(start, duration)
         end
     end)
 

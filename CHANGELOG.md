@@ -1,5 +1,12 @@
 # Synapse Changelog
 
+## 1.0.2 (2026-04-29)
+
+### Fixed
+- Cooldown spinner: avoid comparing secret number values returned by `GetActionCooldown` in mirror mode; secret values are taint-protected and cannot be used with `>` / `<` in addon code. Values are now passed directly to `cooldownFrame:SetCooldown()`, which accepts secret numbers natively.
+
+---
+
 ## 1.0.1 (2026-04-29)
 
 ### Fixed
