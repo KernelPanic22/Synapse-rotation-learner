@@ -1,5 +1,15 @@
 # Synapse Changelog
 
+## 1.0.1 (2026-04-29)
+
+### Fixed
+- Pick mode: replaced per-slot overlay buttons with a cursor-position detection approach so clicking an action bar slot to mirror works reliably on all bar types
+- Pick mode: teal highlight now tracks cursor movement via `OnUpdate` on a single reused frame instead of per-button `OnEnter`/`OnLeave` handlers
+- Pick mode: cancelling (Escape or right-click) now correctly restores the previously configured mirror slot
+- Removed redundant options for display, left only necessary
+
+---
+
 ## 1.0.0
 
 **Initial release for World of Warcraft Midnight (12.0.1+)**

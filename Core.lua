@@ -37,10 +37,7 @@ local DEFAULTS = {
     scale           = 1.0,
     opacityCombat   = 1.0,
     opacityNoCombat = 0.8,
-    showRangeTint   = true,
     showCooldownText = true,          -- OmniCC reads all Cooldown frames automatically
-    showResourceCost = true,          -- Tooltip.lua enrichment toggle
-    fadeOnTarget    = false,
     locked          = false,
     clickThrough    = false,
 
@@ -113,11 +110,8 @@ local function PrintStatus()
     print("|cFF00C8FFSynapse|r status:")
     print("  Mode: " .. mode)
     print("  Scale: " .. cfg.scale)
-    print("  Range tint: " .. tostring(cfg.showRangeTint))
     print("  Cooldown text: " .. tostring(cfg.showCooldownText))
-    print("  Resource cost: " .. tostring(cfg.showResourceCost))
     print("  Opacity combat/nocombat: " .. cfg.opacityCombat .. " / " .. cfg.opacityNoCombat)
-    print("  Fade on target: " .. tostring(cfg.fadeOnTarget))
     print("  Click-through: " .. tostring(cfg.clickThrough))
     print("  Locked: " .. tostring(cfg.locked))
 end
@@ -158,7 +152,6 @@ eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
 eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 eventFrame:RegisterEvent("ENCOUNTER_START")
 eventFrame:RegisterEvent("ENCOUNTER_END")
-eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 eventFrame:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
 eventFrame:RegisterEvent("UPDATE_BINDINGS")
 eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
@@ -238,11 +231,6 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     -- ── Aura Dirty Flag ────────────────────────────────────────
     elseif event == "UNIT_AURA" then
         SynapseNS.aurasDirty = true
-
-    -- ── Target Changed ─────────────────────────────────────────
-    elseif event == "PLAYER_TARGET_CHANGED" then
-        if SynapseNS.OnTargetChanged  then SynapseNS.OnTargetChanged()  end
-        if SynapseNS.RefreshDisplay    then SynapseNS.RefreshDisplay()    end
 
     -- ── Bar / Keybind Changes ──────────────────────────────────
     -- Re-scan bars after slots change (spec switch, bar page turn, etc.)

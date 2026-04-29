@@ -1,4 +1,4 @@
--- =============================================================
+﻿-- =============================================================
 -- Synapse/Tooltip.lua  |  WoW Midnight 12.0.5+  |  Interface: 120005
 -- =============================================================
 -- Tooltip enrichment for the Synapse hover frame.
@@ -19,37 +19,12 @@
 --
 -- SECRET-VALUE SAFETY:
 --   We never read UnitHealth / secret combat values here.
---   C_Spell.GetSpellInfo and C_Spell.GetSpellPowerCost return plain
---   numeric data — safe to use freely.  Both calls are wrapped in
---   pcall as a belt-and-suspenders guard against nil returns from
---   unknown spells or spells that Blizzard has partially protected.
+--   C_Spell.GetSpellInfo returns plain numeric data — safe to use freely.
+--   The call is wrapped in pcall as a belt-and-suspenders guard against
+--   nil returns from unknown spells or spells Blizzard has partially protected.
 -- =============================================================
 
 local ADDON_NAME, SynapseNS = ...
-
--- -------------------------------------------------------------
---  RESOURCE-TYPE LABELS
--- -------------------------------------------------------------
--- Mana / Rage / Energy / Focus / Runic Power + common secondaries.
--- Unknown types fall back to the empty string (no line added).
-local RESOURCE_LABEL = {
-    [0]  = "Mana",
-    [1]  = "Rage",
-    [2]  = "Focus",
-    [3]  = "Energy",
-    [4]  = "Combo Points",
-    [5]  = "Runes",
-    [6]  = "Runic Power",
-    [7]  = "Soul Shards",
-    [8]  = "Lunar Power",
-    [9]  = "Holy Power",
-    [11] = "Maelstrom",
-    [12] = "Chi",
-    [13] = "Insanity",
-    [17] = "Fury",
-    [18] = "Pain",
-    [20] = "Essence",
-}
 
 -- -------------------------------------------------------------
 --  FORMAT HELPERS
@@ -63,13 +38,6 @@ local function FormatCastTime(castTimeMs)
         return s .. " sec"
     end
     return string.format("%.1f sec", s)
-end
-
-local function FormatCost(cost, powerType)
-    if not cost or cost <= 0 then return nil end
-    local label = RESOURCE_LABEL[powerType]
-    if not label then return nil end  -- unknown resource type — skip line
-    return cost .. " " .. label
 end
 
 -- -------------------------------------------------------------
@@ -98,7 +66,6 @@ function SynapseNS.InitTooltip()
 
             -- ── Config guards ─────────────────────────────────────
             if not SynapseNS.cfg then return end
-            if not SynapseNS.cfg.showResourceCost then return end
 
             -- ── Spell ID ──────────────────────────────────────────
             local spellID = tooltipData and tooltipData.id
@@ -111,37 +78,19 @@ function SynapseNS.InitTooltip()
                 castTimeMs = spellInfo.castTime
             end
 
-            -- ── Resource cost ─────────────────────────────────────
-            -- C_Spell.GetSpellPowerCost returns a table of cost entries.
-            -- We display the first (primary) cost only.
-            local resourceCost, powerType
-            local ok2, costTable = pcall(C_Spell.GetSpellPowerCost, spellID)
-            if ok2 and costTable and costTable[1] then
-                resourceCost = costTable[1].cost
-                powerType    = costTable[1].type
-            end
 
             -- ── Build lines ───────────────────────────────────────
             -- Only add the Synapse section if there is at least one
             -- data point to show (graceful degradation).
             local castStr = FormatCastTime(castTimeMs)
-            local costStr = FormatCost(resourceCost, powerType)
 
-            if castStr or costStr then
+            if castStr then
                 -- Header separator
                 tooltip:AddLine("|cFF00C8FF── Synapse ──|r", 1, 1, 1)
-                if castStr then
-                    tooltip:AddDoubleLine(
-                        "  Cast time:", castStr,
-                        0.85, 0.85, 0.85,   -- label: light grey
-                        1.00, 0.82, 0.00)   -- value: gold
-                end
-                if costStr then
-                    tooltip:AddDoubleLine(
-                        "  Cost:", costStr,
-                        0.85, 0.85, 0.85,
-                        1.00, 0.82, 0.00)
-                end
+                tooltip:AddDoubleLine(
+                    "  Cast time:", castStr,
+                    0.85, 0.85, 0.85,   -- label: light grey
+                    1.00, 0.82, 0.00)   -- value: gold
                 -- Force the tooltip to recalculate its size after
                 -- we've added lines (required when using PostCall).
                 tooltip:Show()

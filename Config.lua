@@ -52,9 +52,9 @@ local initialized = false
 local configFrame
 local pickBtn
 local pickOverlay
-local pickBtnRefs = {}
-local togRangeTint, togCooldown, togResourceCost
-local togFadeOnTarget, togClickThrough, togLocked
+local pendingSlot  = 0   -- slot active when pick mode was opened (for cancel restore)
+local togCooldown
+local togClickThrough, togLocked
 local sliderScale, sliderCombat, sliderNoCombat
 
 -- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -241,6 +241,13 @@ end
 -- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 -- ─────────────────────────────────────────────────────────────
 --  PICK MODE
+--  Strategy: pickOverlay covers the full screen and captures ALL
+--  mouse input.  A separate TOOLTIP-strata highlight frame shows
+--  which slot the cursor is over (purely visual, no mouse handling).
+--  OnUpdate detects the hovered slot by comparing the cursor position
+--  against each visible action bar button's screen rect.  OnMouseDown
+--  on the overlay confirms the selection.  This avoids the secure-
+--  frame click-interception problem that child overlay buttons have.
 -- ─────────────────────────────────────────────────────────────
 local BARS = {
     { prefix = "ActionButton",              offset = 0  },
@@ -251,9 +258,58 @@ local BARS = {
     { prefix = "MultiBarLeftButton",        offset = 60 },
 }
 
-local ExitPickMode  -- forward declaration
+local ExitPickMode       -- forward declaration
+local pickHighlight      -- single reused highlight frame (TOOLTIP strata)
+local pickHoveredSlot = 0
+
+-- Returns (slotNumber, srcFrame) of whichever action bar button
+-- the cursor is currently inside, or (0, nil) if none.
+local function GetSlotAtCursor()
+    local cx, cy = GetCursorPosition()
+    local uiScale = UIParent:GetEffectiveScale()
+    cx = cx / uiScale
+    cy = cy / uiScale
+    for _, bar in ipairs(BARS) do
+        for i = 1, 12 do
+            local src = _G[bar.prefix .. i]
+            if src and src:IsVisible() then
+                local l = src:GetLeft()
+                local b = src:GetBottom()
+                local r = src:GetRight()
+                local t = src:GetTop()
+                if l and cx >= l and cx <= r and cy >= b and cy <= t then
+                    return bar.offset + i, src
+                end
+            end
+        end
+    end
+    return 0, nil
+end
 
 local function EnterPickMode()
+    pendingSlot = (SynapseNS.cfg and SynapseNS.cfg.mirrorSlot) or 0
+    if pendingSlot > 0 then
+        -- Tear down the mirrorButton so it cannot intercept clicks
+        -- while the pick overlay is active.
+        SynapseNS.SetMirrorSlot(0)
+    end
+
+    -- Reusable highlight frame (created once, TOOLTIP strata, no mouse).
+    if not pickHighlight then
+        pickHighlight = CreateFrame("Frame", nil, UIParent)
+        pickHighlight:SetFrameStrata("TOOLTIP")
+        pickHighlight:SetFrameLevel(60)
+        local hlTex = pickHighlight:CreateTexture(nil, "ARTWORK")
+        hlTex:SetAllPoints()
+        hlTex:SetColorTexture(0, 0.78, 0.63, 0.60)
+        pickHighlight.label = pickHighlight:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        pickHighlight.label:SetAllPoints()
+        pickHighlight.label:SetJustifyH("CENTER")
+        pickHighlight.label:SetJustifyV("MIDDLE")
+    end
+    pickHighlight:Hide()
+    pickHoveredSlot = 0
+
     if not pickOverlay then
         pickOverlay = CreateFrame("Frame", nil, UIParent)
         pickOverlay:SetAllPoints(UIParent)
@@ -267,50 +323,58 @@ local function EnterPickMode()
         msg:SetWidth(600)
         msg:SetJustifyH("CENTER")
         msg:SetText(
-            "|cFF00C8A0Click any action bar button to mirror as your Assisted Combat slot.|r\n"
+            "|cFF00C8A0Hover over an action bar button and click to select it.|r\n"
          .. "|cFFAAAAAARRight-click or Escape to cancel.|r")
         pickOverlay:EnableMouse(true)
         pickOverlay:EnableKeyboard(true)
         pickOverlay:SetPropagateKeyboardInput(false)
-        pickOverlay:SetScript("OnKeyDown",   function(_, k)   if k == "ESCAPE"        then ExitPickMode(nil) end end)
-        pickOverlay:SetScript("OnMouseDown", function(_, btn) if btn == "RightButton" then ExitPickMode(nil) end end)
+        pickOverlay:SetScript("OnKeyDown", function(_, k)
+            if k == "ESCAPE" then ExitPickMode(nil) end
+        end)
     end
-    pickOverlay:Show()
 
-    for _, bar in ipairs(BARS) do
-        for i = 1, 12 do
-            local slot = bar.offset + i
-            local src  = _G[bar.prefix .. i]
-            if src and src:IsVisible() then
-                local ovr = CreateFrame("Button", nil, UIParent)
-                ovr:SetAllPoints(src)
-                ovr:SetFrameStrata("TOOLTIP")
-                ovr:SetFrameLevel(50)
-                local hl = ovr:CreateTexture(nil, "ARTWORK")
-                hl:SetAllPoints()
-                hl:SetColorTexture(0, 0.78, 0.63, 0.35)
-                local lbl = ovr:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-                lbl:SetAllPoints()
-                lbl:SetText(tostring(slot))
-                lbl:SetJustifyH("CENTER")
-                lbl:SetJustifyV("MIDDLE")
-                ovr:SetScript("OnClick",  function() ExitPickMode(slot) end)
-                ovr:SetScript("OnEnter",  function() hl:SetColorTexture(0, 0.78, 0.63, 0.75) end)
-                ovr:SetScript("OnLeave",  function() hl:SetColorTexture(0, 0.78, 0.63, 0.35) end)
-                table.insert(pickBtnRefs, ovr)
-            end
+    -- Re-assign per-session handlers (safe to re-set each enter).
+    pickOverlay:SetScript("OnUpdate", function()
+        local slot, src = GetSlotAtCursor()
+        pickHoveredSlot = slot
+        if slot > 0 and src then
+            pickHighlight:ClearAllPoints()
+            pickHighlight:SetAllPoints(src)
+            pickHighlight.label:SetText(tostring(slot))
+            pickHighlight:Show()
+        else
+            pickHighlight:Hide()
         end
-    end
+    end)
+
+    pickOverlay:SetScript("OnMouseDown", function(_, btn)
+        if btn == "LeftButton" then
+            if pickHoveredSlot > 0 then
+                ExitPickMode(pickHoveredSlot)
+            end
+        elseif btn == "RightButton" then
+            ExitPickMode(nil)
+        end
+    end)
+
+    pickOverlay:Show()
 end
 
 ExitPickMode = function(selectedSlot)
-    if pickOverlay then pickOverlay:Hide() end
-    for _, b in ipairs(pickBtnRefs) do b:Hide() end
-    pickBtnRefs = {}
+    if pickOverlay then
+        pickOverlay:Hide()
+        pickOverlay:SetScript("OnUpdate",    nil)
+        pickOverlay:SetScript("OnMouseDown", nil)
+    end
+    if pickHighlight then pickHighlight:Hide() end
+    pickHoveredSlot = 0
     if selectedSlot then
         SynapseNS.cfg.mirrorSlot = selectedSlot
         SynapseNS.SetMirrorSlot(selectedSlot)
         SynapseNS.RefreshDisplay()
+    else
+        -- Cancelled: restore whatever slot was active before pick mode.
+        SynapseNS.SetMirrorSlot(pendingSlot)
     end
     configFrame:Show()  -- triggers OnShow -> SyncFromConfig
 end
@@ -320,10 +384,7 @@ local function SyncFromConfig()
     if not cfg then return end
     local slot = cfg.mirrorSlot or 0
     pickBtn:SetText(slot > 0 and ("Slot " .. slot .. "  \226\128\148  click to change") or "Click to pick action bar slot...")
-    togRangeTint:SetChecked(cfg.showRangeTint)
-    togCooldown:SetChecked(cfg.showCooldownText)
-    togResourceCost:SetChecked(cfg.showResourceCost)
-    togFadeOnTarget:SetChecked(cfg.fadeOnTarget)
+    -- togCooldown is frozen (in development) — always stays unchecked
     togClickThrough:SetChecked(cfg.clickThrough)
     togLocked:SetChecked(cfg.locked)
     sliderScale:SetValue(cfg.scale or 1.0)
@@ -468,20 +529,25 @@ function SynapseNS.InitConfig()
     MakeSectionHeader(panel, "DISPLAY", COL1_X, y)
     y = y - 24
 
-    -- row 1
-    local _, t2 = ToggleRow(panel, "Show range tint",        COL1_X, y, COL_W, function(v) SynapseNS.cfg.showRangeTint   = v; SynapseNS.RefreshDisplay() end)
-    togRangeTint = t2
-    local _, t3 = ToggleRow(panel, "Cooldown countdown",     COL2_X, y, COL_W, function(v)
-        SynapseNS.cfg.showCooldownText = v
-        if SynapseNS.ApplyCooldownText then SynapseNS.ApplyCooldownText(v) end
-    end)
-    togCooldown = t3
-    y = y - ROW_H - 4
-
-    -- row 2
-    local _, t4 = ToggleRow(panel, "Resource cost (tooltip)", COL1_X, y, COL_W, function(v) SynapseNS.cfg.showResourceCost = v end)
-    togResourceCost = t4
-    y = y - ROW_H - 4
+    -- row 1  (Cooldown countdown — greyed out, in development)
+    local cdRow = MakeRow(panel, "Cooldown countdown", COL1_X, y, COL_W)
+    -- Dim the label to hint colour so it reads as disabled
+    cdRow:GetChildren()  -- ensure children exist before iterating
+    for _, child in ipairs({ cdRow:GetRegions() }) do
+        if child.SetTextColor then
+            child:SetTextColor(C.hint[1], C.hint[2], C.hint[3], C.hint[4])
+        end
+    end
+    -- Frozen toggle (always off-state, non-interactive)
+    local cdTog = MakeToggle(cdRow, COL_W - TOGGLE_W - 8, -(ROW_H - TOGGLE_H) / 2, nil)
+    cdTog:SetChecked(false)
+    cdTog:EnableMouse(false)
+    cdTog:SetAlpha(0.35)
+    togCooldown = cdTog
+    -- "in development" label sits just below the row
+    local devLbl = MakeText(panel, "|cFFFFAA00in development|r", "GameFontNormalSmall", C.hint, "OVERLAY")
+    devLbl:SetPoint("TOPLEFT", panel, "TOPLEFT", COL1_X + 10, y - ROW_H)
+    y = y - ROW_H - 18
 
     -- Scale slider
     local _, sScale = SliderRow(panel, "Scale", COL1_X, y, COL_W, 0.5, 3.0, 0.1, function(v)
@@ -508,13 +574,11 @@ function SynapseNS.InitConfig()
     MakeSectionHeader(panel, "BEHAVIOUR", COL1_X, y)
     y = y - 24
 
-    local _, t5 = ToggleRow(panel, "Fade when no target",     COL1_X, y, COL_W, function(v) SynapseNS.cfg.fadeOnTarget = v end)
-    togFadeOnTarget = t5
-    local _, t6 = ToggleRow(panel, "Click-through",           COL2_X, y, COL_W, function(v)
+    local _, t5 = ToggleRow(panel, "Click-through",           COL1_X, y, COL_W, function(v)
         SynapseNS.cfg.clickThrough = v
         if SynapseNS.ApplyClickThrough then SynapseNS.ApplyClickThrough(v) end
     end)
-    togClickThrough = t6
+    togClickThrough = t5
     y = y - ROW_H
 
     local _, t7 = ToggleRow(panel, "Lock frame position",     COL1_X, y, COL_W, function(v) SynapseNS.cfg.locked = v; SynapseNS.LockFrame(v) end)

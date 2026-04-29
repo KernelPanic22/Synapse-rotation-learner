@@ -17,7 +17,6 @@
 --           verified technique (curseforge.com/wow/addons/danders-rotation-tracker).
 --
 --   • Cooldown spinner (CooldownFrameTemplate — OmniCC auto-integrates)
---   • Red range tint overlay (throttled to ~150 ms)
 --   • Combat / out-of-combat opacity fade
 --   • Drag-to-move + frame lock
 --   • Click-through option
@@ -30,7 +29,6 @@ local ADDON_NAME, SynapseNS = ...
 --  CONSTANTS
 -- -------------------------------------------------------------
 local BUTTON_SIZE          = 48
-local RANGE_CHECK_THROTTLE = 0.15   -- seconds between IsActionInRange calls
 local COOLDOWN_REFRESH_SEC = 0.5    -- seconds between SetCooldown refreshes
 local QUESTION_TEXTURE     = "Interface\\Icons\\INV_Misc_QuestionMark"
 
@@ -40,15 +38,12 @@ local QUESTION_TEXTURE     = "Interface\\Icons\\INV_Misc_QuestionMark"
 local mainFrame       -- outer draggable Frame
 local iconTexture     -- ARTWORK texture showing the spell icon
 local cooldownFrame   -- Cooldown frame (spinner + OmniCC text)
-local rangeOverlay    -- red OVERLAY texture for out-of-range tint
 local mirrorButton    -- SecureActionButtonTemplate (mirror mode only)
 
 -- -------------------------------------------------------------
 --  TIMERS
 -- -------------------------------------------------------------
-local rangeTimer    = 0
 local cdTimer       = 0
-local isOutOfRange  = false
 
 -- -------------------------------------------------------------
 --  UTILITY: spell icon (Midnight-safe)
@@ -88,29 +83,6 @@ local function GetCurrentCooldown()
         end
     end
     return start, duration, enable
-end
-
--- -------------------------------------------------------------
---  UTILITY: range check
--- -------------------------------------------------------------
--- Returns true if the spell/action is in range (or if there is no
--- valid target, treating that as "in range" to avoid false red tint).
--- NOTE: IsActionInRange and IsSpellInRange return integers (0/1) or
--- nil — NOT secret values.  Safe to compare directly.
-local function CheckRange()
-    if not UnitExists("target") then return true end
-    local slot = SynapseNS.cfg and SynapseNS.cfg.mirrorSlot or 0
-    if slot > 0 then
-        local ok, r = pcall(IsActionInRange, slot, "target")
-        -- r == nil  → n/a (spell has no range requirement) → treat as in range
-        -- r == 0    → out of range
-        -- r == 1    → in range
-        return (not ok) or (r ~= 0)
-    elseif SynapseNS.nextSpellID then
-        local ok, r = pcall(IsSpellInRange, SynapseNS.nextSpellID, "target")
-        return (not ok) or (r ~= 0)
-    end
-    return true
 end
 
 -- -------------------------------------------------------------
@@ -164,13 +136,6 @@ function SynapseNS.InitDisplay()
     cooldownFrame:SetDrawEdge(true)
     cooldownFrame:SetHideCountdownNumbers(not cfg.showCooldownText)
 
-    -- ── Range overlay ──────────────────────────────────────────
-    rangeOverlay = mainFrame:CreateTexture(nil, "OVERLAY")
-    rangeOverlay:SetAllPoints()
-    rangeOverlay:SetColorTexture(1, 0, 0, 0.38)
-    rangeOverlay:Hide()
-
-
     -- ── Drag support ───────────────────────────────────────────
     mainFrame:EnableMouse(not cfg.clickThrough)
     mainFrame:RegisterForDrag("LeftButton")
@@ -205,20 +170,6 @@ function SynapseNS.InitDisplay()
 
     -- ── Per-frame update (range + cooldown refresh) ────────────
     mainFrame:SetScript("OnUpdate", function(self, elapsed)
-        -- Range tint (throttled)
-        if cfg.showRangeTint then
-            rangeTimer = rangeTimer + elapsed
-            if rangeTimer >= RANGE_CHECK_THROTTLE then
-                rangeTimer = 0
-                local inRange = CheckRange()
-                if inRange then
-                    rangeOverlay:Hide()
-                else
-                    rangeOverlay:Show()
-                end
-            end
-        end
-
         -- Cooldown refresh (throttled at 0.5 s — Cooldown widget
         -- counts down automatically once SetCooldown is called, but
         -- we re-sync periodically in case the spell comes off CD).
@@ -329,14 +280,11 @@ function SynapseNS.RefreshDisplay()
         iconTexture:SetTexture(QUESTION_TEXTURE)
     end
 
-
     -- ── Opacity ───────────────────────────────────────────────
     local alpha = SynapseNS.inCombat and cfg.opacityCombat or cfg.opacityNoCombat
     local activeFrame = mirrorButton or mainFrame
     activeFrame:SetAlpha(alpha)
 
-    -- ── Range tint reset (force re-check on next tick) ────────
-    rangeTimer = RANGE_CHECK_THROTTLE  -- triggers immediate check
 end
 
 -- =============================================================
@@ -417,25 +365,9 @@ function SynapseNS.OnCombatChange(inCombat)
     activeFrame:SetAlpha(targetAlpha)
 end
 
--- Called when player targets / de-targets a unit (for fadeOnTarget)
-function SynapseNS.OnTargetChanged()
-    if not mainFrame then return end
-    local cfg = SynapseNS.cfg
-    if not cfg.fadeOnTarget then return end
-    local alpha = (SynapseNS.inCombat and cfg.opacityCombat or cfg.opacityNoCombat)
-    local f = mirrorButton or mainFrame
-    if UnitExists("target") then
-        f:SetAlpha(alpha)
-    else
-        -- Dim when no target and fadeOnTarget is on
-        f:SetAlpha(math.max(alpha * 0.4, 0.1))
-    end
-end
-
 -- Called after aura dirty-flag throttle fires
 function SynapseNS.OnAuraUpdate()
-    -- In Midnight, buff/debuff changes can affect resource costs
-    -- displayed in tooltips and may change range via talent modifiers.
-    -- A lightweight refresh is enough; we don't parse aura lists here.
+    -- A lightweight refresh on aura changes is enough;
+    -- we don't parse aura lists here.
     if SynapseNS.RefreshDisplay then SynapseNS.RefreshDisplay() end
 end
