@@ -2,8 +2,9 @@
 ## Title: |cFF00C8FFSynapse|r
 ## Notes: Smart display for Assisted Combat (WoW Midnight 12.0.1+). Tracks your next rotation spell via glow events and shows the real keybind, cooldown spinner, and range tint. Drag anywhere, configure with /syn.
 ## Author: Synapse
-## Version: 1.0.2
+## Version: 2.0.2
 ## SavedVariables: SynapseDB
+## SavedVariablesPerCharacter: SynapseDBChar
 
 ## X-Website: https://www.curseforge.com/wow/addons/synapse
 ## X-License:  All Rights Reserved unless otherwise explicitly stated.

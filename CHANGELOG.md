@@ -1,5 +1,22 @@
 # Synapse Changelog
 
+## 2.0.2-alpha (2026-04-30)
+
+### Added
+- **Rotation recording** — record your cast sequence via a button in the config window; spells are stored per character
+- **Playback mode** — continuously suggests the next castable spell in your recorded rotation; skips spells on cooldown and advances automatically via an OnUpdate loop
+- **Charge awareness** — spells with charges (e.g. Marrowrend) are treated as castable while charges remain, even during the GCD
+- **Saved profiles** — save, load, and delete named rotation profiles per character from a dropdown UI in the PROFILES section
+- **Spell search** — search your character's spellbook and add spells directly to the active rotation from the config window
+- **Reorder / remove spells** — up/down WoW arrow buttons and a remove button on each rotation row
+- **WoW-native icons** — arrow buttons use `Interface\Buttons\Arrow-*` textures; record button uses the stopwatch icon; dropdown uses a WoW arrow chevron
+
+### Fixed
+- Scrollbar drag detection: both the main config scrollbar and the rotation list scrollbar now use a proper boolean drag flag; previously any left-click after dragging the scrollbar would jump the scroll position
+- Cooldown display: guard against nil `start`/`duration` values from `GetSpellCooldown` to prevent errors on spells with no cooldown data
+
+---
+
 ## 1.0.2 (2026-04-29)
 
 ### Fixed

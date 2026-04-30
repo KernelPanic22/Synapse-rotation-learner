@@ -66,23 +66,23 @@ end
 --  UTILITY: cooldown data for the active tracking target
 -- -------------------------------------------------------------
 local function GetCurrentCooldown()
-    local start, duration, enable = 0, 0, 1
     local slot = SynapseNS.cfg and SynapseNS.cfg.mirrorSlot or 0
+    local s, d, e
     if slot > 0 then
-        -- Mirror mode: slot cooldown is authoritative.
-        -- GetActionCooldown is not a secret-value API.
-        local ok, s, d, e = pcall(GetActionCooldown, slot)
-        if ok and s then start, duration, enable = s, d, e end
+        local ok
+        ok, s, d, e = pcall(GetActionCooldown, slot)
+        if not ok then s = nil end
     elseif SynapseNS.nextSpellID then
-        -- Glow-tracking mode: use spell cooldown.
-        local ok, cd = pcall(C_Spell.GetSpellCooldown, SynapseNS.nextSpellID)
-        if ok and cd and cd.startTime then
-            start    = cd.startTime
-            duration = cd.duration
-            enable   = cd.isEnabled and 1 or 0
-        end
+        local ok
+        ok, s, d, e = pcall(GetSpellCooldown, SynapseNS.nextSpellID)
+        if not ok then s = nil end
     end
-    return start, duration, enable
+    -- Guard against secret values (they appear as non-number in type checks).
+    -- Passing a secret value to SetCooldown causes a taint error in Midnight.
+    if type(s) ~= "number" or type(d) ~= "number" then
+        return 0, 0, 1
+    end
+    return s, d, (type(e) == "number" and e or 1)
 end
 
 -- -------------------------------------------------------------
@@ -268,11 +268,18 @@ end
 -- =============================================================
 function SynapseNS.RefreshDisplay()
     if not mainFrame then return end
-    local cfg   = SynapseNS.cfg
-    local slot  = cfg.mirrorSlot or 0
+    local cfg      = SynapseNS.cfg
+    local slot     = cfg.mirrorSlot or 0
+    local playback = SynapseNS.charCfg and SynapseNS.charCfg.playback
 
     -- ── Icon ──────────────────────────────────────────────────
-    if slot > 0 then
+    -- Playback mode always shows the rotation's current spell,
+    -- overriding the mirror slot so the user sees what to cast next.
+    if playback then
+        iconTexture:SetTexture(SynapseNS.nextSpellID
+            and GetSafeSpellIcon(SynapseNS.nextSpellID)
+            or  QUESTION_TEXTURE)
+    elseif slot > 0 then
         iconTexture:SetTexture(GetMirrorIcon(slot))
     elseif SynapseNS.nextSpellID then
         iconTexture:SetTexture(GetSafeSpellIcon(SynapseNS.nextSpellID))

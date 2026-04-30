@@ -33,7 +33,7 @@ local C = {
 --  LAYOUT CONSTANTS
 -- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 local WIN_W     = 640
-local WIN_H     = 500
+local WIN_H     = 700
 local HEADER_H  = 64
 local FOOTER_H  = 44
 local COL_W     = 288
@@ -43,7 +43,13 @@ local COL2_X    = COL1_X + COL_W + COL_GAP
 local ROW_H     = 36
 local TOGGLE_W  = 44
 local TOGGLE_H  = 22
-local SLIDER_W  = 120
+local SLIDER_W        = 120
+local ROT_ROW_H       = 28   -- height of each spell row in the rotation list
+local ROT_SB_W        = 8    -- scrollbar track width
+local ROT_INNER_W     = WIN_W - 36 - ROT_SB_W - 4  -- list content width (leaves room for scrollbar)
+local CFG_SB_W        = 8    -- main config window scrollbar width
+local SRCH_ROW_H      = 28   -- height of each spell row in search results
+local MAX_SEARCH_RESULTS = 20 -- max spell search results shown at once
 
 -- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  STATE
@@ -56,6 +62,27 @@ local pendingSlot  = 0   -- slot active when pick mode was opened (for cancel re
 local togCooldown
 local togClickThrough, togLocked
 local sliderScale, sliderCombat, sliderNoCombat
+
+-- Rotation section UI refs
+local togPlayback
+local recordBtn
+local recordStatusLbl
+local rotListAnchor
+local rotEmptyLbl
+local rotRows         = {}
+local rotUpdateScrollbar  -- function set during InitConfig to sync the thumb
+local cfgUpdateScrollbar  -- function set during InitConfig to sync the main window scrollbar
+local searchBox
+local searchResultsAnchor
+local searchEmptyLbl
+local searchRows      = {}
+
+-- Profile section UI refs
+local profileSelected    = nil   -- currently chosen profile name
+local profileDropdownTxt         -- label inside the dropdown button
+local profileDropdownPopup       -- popup list frame
+local profileNameBox             -- EditBox for typing a new profile name
+local RefreshProfileDropdown     -- forward declaration
 
 -- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  DRAW HELPERS
@@ -75,6 +102,14 @@ local function MakeText(parent, text, fontObj, c, layer)
     if text then fs:SetText(text) end
     if c    then fs:SetTextColor(c[1], c[2], c[3], c[4]) end
     return fs
+end
+
+-- Safe icon lookup used by rotation / search lists
+local function GetSpellIcon(spellID)
+    if not spellID then return "Interface\\Icons\\INV_Misc_QuestionMark" end
+    local ok, info = pcall(C_Spell.GetSpellInfo, spellID)
+    if ok and info and info.iconID then return info.iconID end
+    return "Interface\\Icons\\INV_Misc_QuestionMark"
 end
 
 -- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -379,6 +414,255 @@ ExitPickMode = function(selectedSlot)
     configFrame:Show()  -- triggers OnShow -> SyncFromConfig
 end
 
+-- -------------------------------------------------------------
+--  PROFILE DROPDOWN
+-- -------------------------------------------------------------
+RefreshProfileDropdown = function()
+    if profileDropdownTxt then
+        profileDropdownTxt:SetText(profileSelected or "-- select profile --")
+    end
+    -- If the selected profile was deleted, clear the selection
+    if profileSelected then
+        local found = false
+        for _, n in ipairs(SynapseNS.GetProfiles()) do
+            if n == profileSelected then found = true; break end
+        end
+        if not found then
+            profileSelected = nil
+            if profileDropdownTxt then profileDropdownTxt:SetText("-- select profile --") end
+        end
+    end
+end
+
+-- -------------------------------------------------------------
+--  ROTATION LIST  (populated on open / on record state change)
+-- -------------------------------------------------------------
+local function RefreshRotationList()
+    if not rotListAnchor then return end
+    local charCfg = SynapseNS.charCfg
+    if not charCfg then
+        rotEmptyLbl:SetShown(true)
+        for _, r in ipairs(rotRows) do r:Hide() end
+        return
+    end
+    local rotation = charCfg.rotation or {}
+    local count    = #rotation
+
+    rotEmptyLbl:SetShown(count == 0)
+
+    for i, spellID in ipairs(rotation) do
+        local row = rotRows[i]
+        if not row then
+            row = CreateFrame("Frame", nil, rotListAnchor)
+            row:SetSize(ROT_INNER_W, ROT_ROW_H)
+            row:SetPoint("TOPLEFT", rotListAnchor, "TOPLEFT", 0, -(i - 1) * ROT_ROW_H)
+            local bg = MakeRect(row, "BACKGROUND", (i % 2 == 0) and C.rowAlt or {0,0,0,0.0})
+            bg:SetAllPoints()
+            local icon = row:CreateTexture(nil, "ARTWORK")
+            icon:SetSize(20, 20)
+            icon:SetPoint("LEFT", row, "LEFT", 4, 0)
+            icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+            row.icon = icon
+            local lbl = MakeText(row, "", "GameFontNormal", C.label, "OVERLAY")
+            lbl:SetPoint("LEFT", row, "LEFT", 30, 0)
+            lbl:SetWidth(ROT_INNER_W - 30 - 22 - 22 - 54 - 14)
+            lbl:SetJustifyH("LEFT")
+            row.lbl = lbl
+            -- Up button
+            local upBtn = CreateFrame("Button", nil, row)
+            upBtn:SetSize(22, 20)
+            upBtn:SetPoint("RIGHT", row, "RIGHT", -78, 0)
+            upBtn:SetNormalTexture("Interface\\Buttons\\Arrow-Up-Up")
+            upBtn:SetHighlightTexture("Interface\\Buttons\\Arrow-Up-Down")
+            upBtn:SetPushedTexture("Interface\\Buttons\\Arrow-Up-Down")
+            row.upBtn = upBtn
+            -- Down button
+            local dnBtn = CreateFrame("Button", nil, row)
+            dnBtn:SetSize(22, 20)
+            dnBtn:SetPoint("RIGHT", row, "RIGHT", -54, 0)
+            dnBtn:SetNormalTexture("Interface\\Buttons\\Arrow-Down-Up")
+            dnBtn:SetHighlightTexture("Interface\\Buttons\\Arrow-Down-Down")
+            dnBtn:SetPushedTexture("Interface\\Buttons\\Arrow-Down-Down")
+            row.dnBtn = dnBtn
+            -- Remove button
+            local rmBtn = CreateFrame("Button", nil, row)
+            rmBtn:SetSize(46, 20)
+            rmBtn:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+            local rmBg  = MakeRect(rmBtn, "ARTWORK", { 0.45, 0.12, 0.10, 1.0 })
+            rmBg:SetAllPoints()
+            local rmTxt = MakeText(rmBtn, "Remove", "GameFontNormalSmall", C.title, "OVERLAY")
+            rmTxt:SetAllPoints(); rmTxt:SetJustifyH("CENTER"); rmTxt:SetJustifyV("MIDDLE")
+            rmBtn:SetScript("OnEnter", function() rmBg:SetAlpha(0.70) end)
+            rmBtn:SetScript("OnLeave", function() rmBg:SetAlpha(1.00) end)
+            row.rmBtn = rmBtn
+            rotRows[i] = row
+        end
+
+        -- Always reposition (row index may have shifted after a swap/remove)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", rotListAnchor, "TOPLEFT", 0, -(i - 1) * ROT_ROW_H)
+
+        row.icon:SetTexture(GetSpellIcon(spellID))
+        row.lbl:SetText(C_Spell.GetSpellName(spellID) or ("Spell " .. spellID))
+
+        -- Up: disabled on first row
+        if i == 1 then
+            row.upBtn:SetScript("OnClick", nil)
+            row.upBtn:SetAlpha(0.3)
+        else
+            row.upBtn:SetAlpha(1.0)
+            row.upBtn:SetScript("OnClick", function()
+                rotation[i], rotation[i-1] = rotation[i-1], rotation[i]
+                if charCfg.playback then SynapseNS.EnablePlayback(true) end
+                RefreshRotationList()
+                RefreshSearchResults()
+            end)
+        end
+
+        -- Down: disabled on last row
+        if i == count then
+            row.dnBtn:SetScript("OnClick", nil)
+            row.dnBtn:SetAlpha(0.3)
+        else
+            row.dnBtn:SetAlpha(1.0)
+            row.dnBtn:SetScript("OnClick", function()
+                rotation[i], rotation[i+1] = rotation[i+1], rotation[i]
+                if charCfg.playback then SynapseNS.EnablePlayback(true) end
+                RefreshRotationList()
+                RefreshSearchResults()
+            end)
+        end
+
+        -- Remove
+        row.rmBtn:SetScript("OnClick", function()
+            table.remove(rotation, i)
+            if charCfg.playback then SynapseNS.EnablePlayback(true) end
+            RefreshRotationList()
+            RefreshSearchResults()
+        end)
+
+        row:Show()
+    end
+
+    for i = count + 1, #rotRows do rotRows[i]:Hide() end
+    rotListAnchor:SetHeight(math.max(ROT_ROW_H, count * ROT_ROW_H))
+    if rotUpdateScrollbar then rotUpdateScrollbar() end
+end
+
+-- -------------------------------------------------------------
+--  SPELL SEARCH RESULTS
+-- -------------------------------------------------------------
+local function RefreshSearchResults()
+    if not searchResultsAnchor then return end
+    local query = (searchBox and searchBox:GetText() or ""):lower()
+    if query == "" then
+        searchEmptyLbl:SetText("Type to search your character\226\128\153s spells.")
+        searchEmptyLbl:Show()
+        for _, r in ipairs(searchRows) do r:Hide() end
+        searchResultsAnchor:SetHeight(SRCH_ROW_H)
+        return
+    end
+
+    local charCfg = SynapseNS.charCfg
+    local rotation = charCfg and (charCfg.rotation or {}) or {}
+
+    -- Build a lookup set for O(1) "already in rotation" checks
+    local inRotation = {}
+    for _, id in ipairs(rotation) do inRotation[id] = true end
+
+    -- Enumerate spellbook (same pattern as blizzkili GetAvailableSpells)
+    local results = {}
+    local numLines = C_SpellBook.GetNumSpellBookSkillLines()
+    for i = 1, numLines do
+        local lineInfo = C_SpellBook.GetSpellBookSkillLineInfo(i)
+        if lineInfo then
+            local offset   = lineInfo.itemIndexOffset
+            local numSlots = lineInfo.numSpellBookItems
+            for j = offset + 1, offset + numSlots do
+                local itemInfo = C_SpellBook.GetSpellBookItemInfo(j, Enum.SpellBookSpellBank.Player)
+                if itemInfo
+                   and itemInfo.itemType == Enum.SpellBookItemType.Spell
+                   and not itemInfo.isPassive
+                   and not itemInfo.isOffSpec then
+                    local id   = itemInfo.spellID
+                    local name = C_Spell.GetSpellName(id)
+                    if name and name:lower():find(query, 1, true) then
+                        results[#results + 1] = { id = id, name = name }
+                        if #results >= MAX_SEARCH_RESULTS then break end
+                    end
+                end
+            end
+        end
+        if #results >= MAX_SEARCH_RESULTS then break end
+    end
+
+    searchEmptyLbl:SetShown(#results == 0)
+    if #results == 0 then
+        searchEmptyLbl:SetText("No spells found.")
+    end
+
+    for i, entry in ipairs(results) do
+        local row = searchRows[i]
+        if not row then
+            row = CreateFrame("Frame", nil, searchResultsAnchor)
+            row:SetSize(WIN_W - 36, SRCH_ROW_H)
+            row:SetPoint("TOPLEFT", searchResultsAnchor, "TOPLEFT", 0, -(i - 1) * SRCH_ROW_H)
+            local bg = MakeRect(row, "BACKGROUND", (i % 2 == 0) and C.rowAlt or {0,0,0,0.0})
+            bg:SetAllPoints()
+            local icon = row:CreateTexture(nil, "ARTWORK")
+            icon:SetSize(20, 20)
+            icon:SetPoint("LEFT", row, "LEFT", 4, 0)
+            icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+            row.icon = icon
+            local lbl = MakeText(row, "", "GameFontNormal", C.label, "OVERLAY")
+            lbl:SetPoint("LEFT", row, "LEFT", 30, 0)
+            lbl:SetWidth(WIN_W - 36 - 30 - 92)
+            lbl:SetJustifyH("LEFT")
+            row.lbl = lbl
+            local btn = CreateFrame("Button", nil, row)
+            btn:SetSize(84, 20)
+            btn:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+            local btnBg  = MakeRect(btn, "ARTWORK", C.accentDim)
+            btnBg:SetAllPoints()
+            local btnTxt = MakeText(btn, "", "GameFontNormalSmall", C.title, "OVERLAY")
+            btnTxt:SetAllPoints()
+            btnTxt:SetJustifyH("CENTER")
+            btnTxt:SetJustifyV("MIDDLE")
+            btn:SetScript("OnEnter", function() btnBg:SetAlpha(0.70) end)
+            btn:SetScript("OnLeave", function() btnBg:SetAlpha(1.00) end)
+            row.btn    = btn
+            row.btnBg  = btnBg
+            row.btnTxt = btnTxt
+            searchRows[i] = row
+        end
+
+        local spellID   = entry.id
+        local alreadyIn = inRotation[spellID]
+        row.icon:SetTexture(GetSpellIcon(spellID))
+        row.lbl:SetText(entry.name)
+        if alreadyIn then
+            row.btnTxt:SetText("\226\156\147 Added")
+            FillColor(row.btnBg, { 0.15, 0.40, 0.25, 1.0 })
+            row.btn:SetScript("OnClick", nil)  -- already in list, no action
+        else
+            row.btnTxt:SetText("+ Add")
+            FillColor(row.btnBg, C.accentDim)
+            row.btn:SetScript("OnClick", function()
+                if charCfg then
+                    charCfg.rotation = charCfg.rotation or {}
+                    charCfg.rotation[#charCfg.rotation + 1] = spellID
+                end
+                RefreshSearchResults()
+                RefreshRotationList()
+            end)
+        end
+        row:Show()
+    end
+
+    for i = #results + 1, #searchRows do searchRows[i]:Hide() end
+    searchResultsAnchor:SetHeight(math.max(SRCH_ROW_H, #results * SRCH_ROW_H))
+end
+
 local function SyncFromConfig()
     local cfg = SynapseNS.cfg
     if not cfg then return end
@@ -390,6 +674,11 @@ local function SyncFromConfig()
     sliderScale:SetValue(cfg.scale or 1.0)
     sliderCombat:SetValue(cfg.opacityCombat or 1.0)
     sliderNoCombat:SetValue(cfg.opacityNoCombat or 0.8)
+    if togPlayback and SynapseNS.charCfg then
+        togPlayback:SetChecked(SynapseNS.charCfg.playback or false)
+    end
+    RefreshRotationList()
+    RefreshProfileDropdown()
 end
 
 -- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -481,13 +770,79 @@ function SynapseNS.InitConfig()
     closeBtn:SetScript("OnLeave", function() closeBg:SetAlpha(1.00) end)
 
     -- â”€â”€ Scroll area â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    local scrollFrame = CreateFrame("ScrollFrame", nil, configFrame, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT",     configFrame, "TOPLEFT",      0, -HEADER_H)
-    scrollFrame:SetPoint("BOTTOMRIGHT", configFrame, "BOTTOMRIGHT", -18,  FOOTER_H)
+    local scrollFrame = CreateFrame("ScrollFrame", nil, configFrame)
+    scrollFrame:SetPoint("TOPLEFT",     configFrame, "TOPLEFT",      0,           -HEADER_H)
+    scrollFrame:SetPoint("BOTTOMRIGHT", configFrame, "BOTTOMRIGHT", -(CFG_SB_W + 4), FOOTER_H)
 
     local panel = CreateFrame("Frame", nil, scrollFrame)
-    panel:SetWidth(WIN_W - 18)
+    panel:SetWidth(WIN_W - CFG_SB_W - 4)
     scrollFrame:SetScrollChild(panel)
+
+    -- Mouse-wheel: small step (20px) for smooth scrolling
+    scrollFrame:EnableMouseWheel(true)
+    scrollFrame:SetScript("OnMouseWheel", function(self, delta)
+        local cur = self:GetVerticalScroll()
+        local max = self:GetVerticalScrollRange()
+        self:SetVerticalScroll(math.max(0, math.min(max, cur - delta * 20)))
+        if cfgUpdateScrollbar then cfgUpdateScrollbar() end
+    end)
+
+    -- ── Main config scrollbar (same style as rotation list) ─────────────
+    local cfgSbTrack = CreateFrame("Frame", nil, configFrame)
+    cfgSbTrack:SetPoint("TOPLEFT",     configFrame, "TOPRIGHT",    -(CFG_SB_W), -HEADER_H)
+    cfgSbTrack:SetPoint("BOTTOMRIGHT", configFrame, "BOTTOMRIGHT",  0,           FOOTER_H)
+    MakeRect(cfgSbTrack, "BACKGROUND", { 0.12, 0.14, 0.16, 1.0 }):SetAllPoints()
+
+    local cfgSbThumb = CreateFrame("Button", nil, cfgSbTrack)
+    cfgSbThumb:SetSize(CFG_SB_W, 40)
+    cfgSbThumb:SetPoint("TOPLEFT", cfgSbTrack, "TOPLEFT", 0, 0)
+    MakeRect(cfgSbThumb, "ARTWORK", { 0.35, 0.75, 0.65, 0.85 }):SetAllPoints()
+    cfgSbThumb:RegisterForDrag("LeftButton")
+    cfgSbThumb:SetMovable(true)
+
+    local cfgDragStartY, cfgDragStartScroll = 0, 0
+    local cfgDragging = false
+    cfgSbThumb:SetScript("OnDragStart", function(self)
+        cfgDragging        = true
+        cfgDragStartY      = select(2, GetCursorPosition()) / UIParent:GetEffectiveScale()
+        cfgDragStartScroll = scrollFrame:GetVerticalScroll()
+    end)
+    cfgSbThumb:SetScript("OnDragStop", function() cfgDragging = false end)
+    cfgSbThumb:SetScript("OnUpdate", function(self)
+        if not cfgDragging then return end
+        local maxScroll = scrollFrame:GetVerticalScrollRange()
+        if maxScroll <= 0 then return end
+        local trackH = cfgSbTrack:GetHeight()
+        local thumbH = self:GetHeight()
+        local travel = trackH - thumbH
+        if travel <= 0 then return end
+        local curY      = select(2, GetCursorPosition()) / UIParent:GetEffectiveScale()
+        local dy        = cfgDragStartY - curY
+        local newScroll = cfgDragStartScroll + (dy / travel) * maxScroll
+        scrollFrame:SetVerticalScroll(math.max(0, math.min(maxScroll, newScroll)))
+        if cfgUpdateScrollbar then cfgUpdateScrollbar() end
+    end)
+
+    cfgUpdateScrollbar = function()
+        local trackH    = cfgSbTrack:GetHeight()
+        if trackH <= 0 then return end
+        local maxScroll = scrollFrame:GetVerticalScrollRange()
+        if maxScroll <= 0 then
+            cfgSbThumb:Hide()
+            return
+        end
+        cfgSbThumb:Show()
+        local viewH  = scrollFrame:GetHeight()
+        local total  = viewH + maxScroll
+        local ratio  = viewH / total
+        local thumbH = math.max(16, math.floor(trackH * ratio))
+        local travel = trackH - thumbH
+        local cur    = scrollFrame:GetVerticalScroll()
+        local top    = -(travel * (cur / maxScroll))
+        cfgSbThumb:SetHeight(thumbH)
+        cfgSbThumb:ClearAllPoints()
+        cfgSbThumb:SetPoint("TOPLEFT", cfgSbTrack, "TOPLEFT", 0, top)
+    end
 
     local y = -10  -- running y cursor
 
@@ -585,7 +940,399 @@ function SynapseNS.InitConfig()
     togLocked = t7
     y = y - ROW_H - 8
 
+    -- ══════════════════════════════════════════════════════════════
+    -- ROTATION
+    -- ══════════════════════════════════════════════════════════════
+    MakeSectionHeader(panel, "ROTATION", COL1_X, y)
+    y = y - 24
+
+    -- Enable Playback toggle (full width so label has room)
+    local _, togPb = ToggleRow(panel, "Enable playback mode", COL1_X, y, WIN_W - 36, function(v)
+        SynapseNS.EnablePlayback(v)
+    end)
+    togPlayback = togPb
+    y = y - ROW_H - 8
+
+    -- ── Active rotation list ─────────────────────────────────────────────
+    local rotHdr = MakeText(panel,
+        "Active rotation \226\128\148 reorder or remove spells:",
+        "GameFontNormalSmall", C.hint, "OVERLAY")
+    rotHdr:SetPoint("TOPLEFT", panel, "TOPLEFT", COL1_X + 2, y)
+    y = y - 16
+
+    local ROT_LIST_H = ROT_ROW_H * 6   -- fixed visible height (6 rows)
+    local rotScrollFrame = CreateFrame("ScrollFrame", nil, panel)
+    rotScrollFrame:SetSize(ROT_INNER_W, ROT_LIST_H)
+    rotScrollFrame:SetPoint("TOPLEFT", panel, "TOPLEFT", COL1_X, y)
+
+    rotListAnchor = CreateFrame("Frame", nil, rotScrollFrame)
+    rotListAnchor:SetSize(ROT_INNER_W, ROT_ROW_H)
+    rotScrollFrame:SetScrollChild(rotListAnchor)
+
+    -- Scrollbar
+    local sbTrack = CreateFrame("Frame", nil, panel)
+    sbTrack:SetSize(ROT_SB_W, ROT_LIST_H)
+    sbTrack:SetPoint("TOPLEFT", rotScrollFrame, "TOPRIGHT", 4, 0)
+    MakeRect(sbTrack, "BACKGROUND", { 0.12, 0.14, 0.16, 1.0 }):SetAllPoints()
+
+    local sbThumb = CreateFrame("Button", nil, sbTrack)
+    sbThumb:SetSize(ROT_SB_W, ROT_LIST_H)
+    sbThumb:SetPoint("TOPLEFT", sbTrack, "TOPLEFT", 0, 0)
+    MakeRect(sbThumb, "ARTWORK", { 0.35, 0.75, 0.65, 0.85 }):SetAllPoints()
+    sbThumb:RegisterForDrag("LeftButton")
+    sbThumb:SetMovable(true)
+
+    local dragStartY, dragStartScroll = 0, 0
+    local rotDragging = false
+    sbThumb:SetScript("OnDragStart", function(self)
+        rotDragging     = true
+        dragStartY      = select(2, GetCursorPosition()) / UIParent:GetEffectiveScale()
+        dragStartScroll = rotScrollFrame:GetVerticalScroll()
+    end)
+    sbThumb:SetScript("OnDragStop", function() rotDragging = false end)
+    sbThumb:SetScript("OnUpdate", function(self)
+        if not rotDragging then return end
+        local maxScroll = rotScrollFrame:GetVerticalScrollRange()
+        if maxScroll <= 0 then return end
+        local thumbH = self:GetHeight()
+        local travel = ROT_LIST_H - thumbH
+        if travel <= 0 then return end
+        local curY   = select(2, GetCursorPosition()) / UIParent:GetEffectiveScale()
+        local dy     = dragStartY - curY
+        local newScroll = dragStartScroll + (dy / travel) * maxScroll
+        rotScrollFrame:SetVerticalScroll(math.max(0, math.min(maxScroll, newScroll)))
+        rotUpdateScrollbar()
+    end)
+
+    rotUpdateScrollbar = function()
+        local maxScroll = rotScrollFrame:GetVerticalScrollRange()
+        if maxScroll <= 0 then
+            sbThumb:SetHeight(ROT_LIST_H)
+            sbThumb:SetPoint("TOPLEFT", sbTrack, "TOPLEFT", 0, 0)
+            sbThumb:Hide()
+            return
+        end
+        sbThumb:Show()
+        local ratio    = ROT_LIST_H / (ROT_LIST_H + maxScroll)
+        local thumbH   = math.max(16, math.floor(ROT_LIST_H * ratio))
+        local travel   = ROT_LIST_H - thumbH
+        local cur      = rotScrollFrame:GetVerticalScroll()
+        local thumbTop = -(travel * (cur / maxScroll))
+        sbThumb:SetHeight(thumbH)
+        sbThumb:ClearAllPoints()
+        sbThumb:SetPoint("TOPLEFT", sbTrack, "TOPLEFT", 0, thumbTop)
+    end
+
+    rotScrollFrame:EnableMouseWheel(true)
+    rotScrollFrame:SetScript("OnMouseWheel", function(self, delta)
+        local cur = self:GetVerticalScroll()
+        local max = self:GetVerticalScrollRange()
+        self:SetVerticalScroll(math.max(0, math.min(max, cur - delta * ROT_ROW_H * 2)))
+        rotUpdateScrollbar()
+    end)
+
+    rotEmptyLbl = MakeText(rotListAnchor,
+        "No rotation recorded. Use Record Rotation below or load a profile.",
+        "GameFontNormalSmall", C.hint, "OVERLAY")
+    rotEmptyLbl:SetPoint("TOPLEFT", rotListAnchor, "TOPLEFT", 4, -6)
+    rotEmptyLbl:SetWidth(ROT_INNER_W - 8)
+    rotEmptyLbl:SetJustifyH("LEFT")
+
+    y = y - ROT_LIST_H - 12
+
+    -- ── Record Rotation ──────────────────────────────────────────────────
+    local recRow = CreateFrame("Frame", nil, panel)
+    recRow:SetSize(WIN_W - 36, ROW_H)
+    recRow:SetPoint("TOPLEFT", panel, "TOPLEFT", COL1_X, y)
+
+    recordBtn = CreateFrame("Button", nil, recRow)
+    recordBtn:SetSize(220, 26)
+    recordBtn:SetPoint("LEFT", recRow, "LEFT", 0, 0)
+    local recBtnBg  = MakeRect(recordBtn, "ARTWORK", C.accentDim)
+    recBtnBg:SetAllPoints()
+    local recBtnTxt = MakeText(recordBtn, "|TInterface\\Icons\\INV_Misc_StopWatch_01:14|t Record Rotation", "GameFontNormalSmall", C.title, "OVERLAY")
+    recBtnTxt:SetAllPoints()
+    recBtnTxt:SetJustifyH("CENTER")
+    recBtnTxt:SetJustifyV("MIDDLE")
+    recordBtn:SetScript("OnEnter", function() recBtnBg:SetAlpha(0.70) end)
+    recordBtn:SetScript("OnLeave", function() recBtnBg:SetAlpha(1.00) end)
+    recordBtn:SetScript("OnClick", function()
+        if SynapseNS.recordMode then SynapseNS.StopRecording()
+        else SynapseNS.StartRecording() end
+    end)
+    recordBtn._bg  = recBtnBg
+    recordBtn._txt = recBtnTxt
+
+    recordStatusLbl = MakeText(recRow, "No rotation recorded.", "GameFontNormalSmall", C.hint, "OVERLAY")
+    recordStatusLbl:SetPoint("LEFT", recordBtn, "RIGHT", 10, 0)
+    recordStatusLbl:SetWidth(WIN_W - 36 - 220 - 10)
+    recordStatusLbl:SetJustifyH("LEFT")
+    y = y - ROW_H - 12
+
+    -- ── Profiles dropdown ────────────────────────────────────────────────
+    MakeSectionHeader(panel, "PROFILES", COL1_X, y)
+    y = y - 28
+
+    -- Row 1: dropdown + Load + Save + Delete
+    local DROPDOWN_W = WIN_W - 36 - 60 - 60 - 64 - 24  -- leaves room for 3 buttons
+    local ddRow = CreateFrame("Frame", nil, panel)
+    ddRow:SetSize(WIN_W - 36, ROT_ROW_H)
+    ddRow:SetPoint("TOPLEFT", panel, "TOPLEFT", COL1_X, y)
+
+    -- Dropdown button
+    local ddBtn = CreateFrame("Button", nil, ddRow)
+    ddBtn:SetSize(DROPDOWN_W, 24)
+    ddBtn:SetPoint("LEFT", ddRow, "LEFT", 0, 0)
+    MakeRect(ddBtn, "BACKGROUND", { 0.10, 0.12, 0.14, 1.0 }):SetAllPoints()
+    local ddBorder = MakeRect(ddBtn, "BORDER", C.border)
+    ddBorder:SetSize(DROPDOWN_W, 1)
+    ddBorder:SetPoint("BOTTOMLEFT", ddBtn, "BOTTOMLEFT")
+
+    profileDropdownTxt = MakeText(ddBtn, "-- select profile --", "GameFontNormal", C.label, "OVERLAY")
+    profileDropdownTxt:SetPoint("LEFT",  ddBtn, "LEFT",  8, 0)
+    profileDropdownTxt:SetPoint("RIGHT", ddBtn, "RIGHT", -20, 0)
+    profileDropdownTxt:SetJustifyH("LEFT")
+
+    local ddArrow = ddBtn:CreateTexture(nil, "OVERLAY")
+    ddArrow:SetTexture("Interface\\Buttons\\Arrow-Down-Up")
+    ddArrow:SetSize(14, 12)
+    ddArrow:SetPoint("RIGHT", ddBtn, "RIGHT", -5, 0)
+
+    -- Load button
+    local function MakeActionBtn(parent, label, xRight, color)
+        local btn = CreateFrame("Button", nil, parent)
+        btn:SetSize(56, 24)
+        btn:SetPoint("RIGHT", parent, "RIGHT", xRight, 0)
+        local bg = MakeRect(btn, "ARTWORK", color or C.accentDim)
+        bg:SetAllPoints()
+        local txt = MakeText(btn, label, "GameFontNormalSmall", C.title, "OVERLAY")
+        txt:SetAllPoints(); txt:SetJustifyH("CENTER"); txt:SetJustifyV("MIDDLE")
+        btn:SetScript("OnEnter", function() bg:SetAlpha(0.70) end)
+        btn:SetScript("OnLeave", function() bg:SetAlpha(1.00) end)
+        return btn
+    end
+
+    local ddDeleteBtn = MakeActionBtn(ddRow, "Delete", -4,   { 0.45, 0.12, 0.10, 1.0 })
+    local ddSaveBtn   = MakeActionBtn(ddRow, "Save",   -64,  C.accentDim)
+    local ddLoadBtn   = MakeActionBtn(ddRow, "Load",   -124, C.accentDim)
+
+    -- Popup list (parented to configFrame so it overlaps other panel content)
+    profileDropdownPopup = CreateFrame("Frame", nil, configFrame)
+    profileDropdownPopup:SetFrameStrata("FULLSCREEN")
+    profileDropdownPopup:SetFrameLevel(80)
+    profileDropdownPopup:Hide()
+    MakeRect(profileDropdownPopup, "BACKGROUND", { 0.06, 0.08, 0.09, 0.98 }):SetAllPoints()
+    local popupBorder = MakeRect(profileDropdownPopup, "BORDER", C.border)
+    popupBorder:SetAllPoints()
+
+    -- Holds popup item buttons; rebuilt each time popup opens
+    local popupItems = {}
+
+    local function CloseDropdown()
+        profileDropdownPopup:Hide()
+        profileDropdownPopup:SetScript("OnHide", nil)
+    end
+
+    local function OpenDropdown()
+        -- Clear old items
+        for _, item in ipairs(popupItems) do item:Hide() end
+        popupItems = {}
+
+        local names = SynapseNS.GetProfiles()
+        if #names == 0 then return end  -- nothing to show
+
+        local itemH = 24
+        profileDropdownPopup:SetWidth(DROPDOWN_W)
+        profileDropdownPopup:SetHeight(#names * itemH + 4)
+
+        -- Position popup below the dropdown button
+        profileDropdownPopup:ClearAllPoints()
+        profileDropdownPopup:SetPoint("TOPLEFT", ddBtn, "BOTTOMLEFT", 0, -2)
+
+        for i, name in ipairs(names) do
+            local item = CreateFrame("Button", nil, profileDropdownPopup)
+            item:SetSize(DROPDOWN_W, itemH)
+            item:SetPoint("TOPLEFT", profileDropdownPopup, "TOPLEFT", 0, -(i - 1) * itemH - 2)
+            local itemBg = MakeRect(item, "BACKGROUND", { 0.06, 0.08, 0.09, 0.0 })
+            itemBg:SetAllPoints()
+            local itemTxt = MakeText(item, name, "GameFontNormal", C.label, "OVERLAY")
+            itemTxt:SetPoint("LEFT", item, "LEFT", 8, 0)
+            item:SetScript("OnEnter", function() FillColor(itemBg, C.rowAlt) end)
+            item:SetScript("OnLeave", function() FillColor(itemBg, { 0.06, 0.08, 0.09, 0.0 }) end)
+            local capName = name
+            item:SetScript("OnClick", function()
+                profileSelected = capName
+                profileDropdownTxt:SetText(capName)
+                CloseDropdown()
+            end)
+            popupItems[i] = item
+        end
+
+        profileDropdownPopup:Show()
+        -- Close when clicking anywhere outside
+        profileDropdownPopup:SetScript("OnHide", nil)
+    end
+
+    ddBtn:SetScript("OnClick", function()
+        if profileDropdownPopup:IsShown() then
+            CloseDropdown()
+        else
+            OpenDropdown()
+        end
+    end)
+
+    -- Close popup when config frame is hidden
+    configFrame:HookScript("OnHide", function() CloseDropdown() end)
+
+    -- Load
+    ddLoadBtn:SetScript("OnClick", function()
+        if not profileSelected then return end
+        SynapseNS.LoadProfile(profileSelected)
+        RefreshRotationList()
+    end)
+
+    -- Save (overwrite selected profile with current rotation)
+    ddSaveBtn:SetScript("OnClick", function()
+        if not profileSelected then return end
+        SynapseNS.SaveProfile(profileSelected)
+        RefreshProfileDropdown()
+    end)
+
+    -- Delete
+    ddDeleteBtn:SetScript("OnClick", function()
+        if not profileSelected then return end
+        SynapseNS.DeleteProfile(profileSelected)
+        profileSelected = nil
+        RefreshProfileDropdown()
+    end)
+
+    y = y - ROT_ROW_H - 4
+
+    -- Row 2: new profile name input + Save New button
+    local newRow = CreateFrame("Frame", nil, panel)
+    newRow:SetSize(WIN_W - 36, ROT_ROW_H)
+    newRow:SetPoint("TOPLEFT", panel, "TOPLEFT", COL1_X, y)
+
+    local newOuter = CreateFrame("Frame", nil, newRow)
+    newOuter:SetSize(DROPDOWN_W, 24)
+    newOuter:SetPoint("LEFT", newRow, "LEFT", 0, 0)
+    MakeRect(newOuter, "BACKGROUND", { 0.10, 0.12, 0.14, 1.0 }):SetAllPoints()
+    local newBorder = MakeRect(newOuter, "BORDER", C.border)
+    newBorder:SetSize(DROPDOWN_W, 1)
+    newBorder:SetPoint("BOTTOMLEFT", newOuter, "BOTTOMLEFT")
+
+    local newPh = MakeText(newOuter, "New profile name\226\128\166", "GameFontNormal", C.hint, "OVERLAY")
+    newPh:SetPoint("LEFT", newOuter, "LEFT", 8, 0)
+
+    profileNameBox = CreateFrame("EditBox", nil, newOuter)
+    profileNameBox:SetSize(newOuter:GetWidth() - 12, 20)
+    profileNameBox:SetPoint("LEFT", newOuter, "LEFT", 6, 0)
+    profileNameBox:SetFontObject("GameFontNormal")
+    profileNameBox:SetTextColor(C.label[1], C.label[2], C.label[3], 1)
+    profileNameBox:SetAutoFocus(false)
+    profileNameBox:EnableMouse(true)
+    profileNameBox:EnableKeyboard(true)
+    profileNameBox:SetMaxLetters(48)
+    profileNameBox:SetScript("OnTextChanged", function(self) newPh:SetShown(self:GetText() == "") end)
+    profileNameBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+
+    local function DoSaveNew()
+        local name = profileNameBox:GetText():match("^%s*(.-)%s*$")
+        if not name or name == "" then return end
+        SynapseNS.SaveProfile(name)
+        profileSelected = name
+        profileNameBox:SetText(""); newPh:Show()
+        RefreshProfileDropdown()
+    end
+    profileNameBox:SetScript("OnEnterPressed", function() DoSaveNew() end)
+
+    local saveNewBtn = CreateFrame("Button", nil, newRow)
+    saveNewBtn:SetSize(56, 24)
+    saveNewBtn:SetPoint("LEFT", newOuter, "RIGHT", 8, 0)
+    local saveNewBg = MakeRect(saveNewBtn, "ARTWORK", C.accentDim)
+    saveNewBg:SetAllPoints()
+    local saveNewTxt = MakeText(saveNewBtn, "Save New", "GameFontNormalSmall", C.title, "OVERLAY")
+    saveNewTxt:SetAllPoints(); saveNewTxt:SetJustifyH("CENTER"); saveNewTxt:SetJustifyV("MIDDLE")
+    saveNewBtn:SetScript("OnEnter", function() saveNewBg:SetAlpha(0.70) end)
+    saveNewBtn:SetScript("OnLeave", function() saveNewBg:SetAlpha(1.00) end)
+    saveNewBtn:SetScript("OnClick", DoSaveNew)
+
+    y = y - ROT_ROW_H - 12
+
+    -- ── Spell search ───────────────────────────────────────────────────────
+    MakeSectionHeader(panel, "SPELL SEARCH \226\128\148 add spells to rotation", COL1_X, y)
+    y = y - 28
+
+    local searchOuter = CreateFrame("Frame", nil, panel)
+    searchOuter:SetSize(WIN_W - 36, 26)
+    searchOuter:SetPoint("TOPLEFT", panel, "TOPLEFT", COL1_X, y)
+    MakeRect(searchOuter, "BACKGROUND", { 0.10, 0.12, 0.14, 1.0 }):SetAllPoints()
+    local searchBorderTex = MakeRect(searchOuter, "BORDER", C.border)
+    searchBorderTex:SetSize(WIN_W - 36, 1)
+    searchBorderTex:SetPoint("BOTTOMLEFT", searchOuter, "BOTTOMLEFT")
+
+    local phLbl = MakeText(searchOuter, "Search spells\226\128\166", "GameFontNormal", C.hint, "OVERLAY")
+    phLbl:SetPoint("LEFT", searchOuter, "LEFT", 8, 0)
+
+    searchBox = CreateFrame("EditBox", "SynapseSearchBox", searchOuter)
+    searchBox:SetSize(WIN_W - 36 - 8, 20)
+    searchBox:SetPoint("LEFT", searchOuter, "LEFT", 6, 0)
+    searchBox:SetFontObject("GameFontNormal")
+    searchBox:SetTextColor(C.label[1], C.label[2], C.label[3], 1)
+    searchBox:SetAutoFocus(false)
+    searchBox:EnableMouse(true)
+    searchBox:EnableKeyboard(true)
+    searchBox:SetMaxLetters(64)
+    searchBox:SetScript("OnTextChanged", function(self)
+        phLbl:SetShown(self:GetText() == "")
+        RefreshSearchResults()
+    end)
+    searchBox:SetScript("OnEscapePressed", function(self)
+        self:SetText("")
+        self:ClearFocus()
+    end)
+    y = y - 26 - 6
+
+    searchResultsAnchor = CreateFrame("Frame", nil, panel)
+    searchResultsAnchor:SetPoint("TOPLEFT", panel, "TOPLEFT", COL1_X, y)
+    searchResultsAnchor:SetSize(WIN_W - 36, SRCH_ROW_H)
+    searchEmptyLbl = MakeText(searchResultsAnchor,
+        "Type to search your character\226\128\153s spells.",
+        "GameFontNormalSmall", C.hint, "OVERLAY")
+    searchEmptyLbl:SetPoint("TOPLEFT", searchResultsAnchor, "TOPLEFT", 4, -6)
+    y = y - SRCH_ROW_H * 8 - 12
+
     panel:SetHeight(math.abs(y) + 16)
+    if cfgUpdateScrollbar then cfgUpdateScrollbar() end
+
+    -- ── Record state hook ─────────────────────────────────────────────────
+    -- Invoked by Core.lua on StartRecording / StopRecording / EnablePlayback
+    SynapseNS.OnRecordStateChange = function()
+        if not recordBtn then return end
+        if SynapseNS.recordMode then
+            FillColor(recordBtn._bg, { 0.55, 0.15, 0.12, 1.0 })
+            recordBtn._txt:SetText("|TInterface\\Icons\\INV_Misc_StopWatch_01:14|t Stop Recording")
+        else
+            FillColor(recordBtn._bg, C.accentDim)
+            recordBtn._txt:SetText("|TInterface\\Icons\\INV_Misc_StopWatch_01:14|t Record Rotation")
+        end
+        local charCfg = SynapseNS.charCfg
+        local count = SynapseNS.recordMode
+            and #SynapseNS.recordedSpells
+            or (charCfg and #(charCfg.rotation or {}) or 0)
+        if SynapseNS.recordMode then
+            recordStatusLbl:SetText("Recording\226\128\166 " .. count .. " spell(s) captured")
+        elseif count > 0 then
+            recordStatusLbl:SetText(count .. " spell(s) recorded")
+        else
+            recordStatusLbl:SetText("No rotation recorded.")
+        end
+        if togPlayback and charCfg then
+            togPlayback:SetChecked(charCfg.playback or false)
+        end
+        RefreshRotationList()
+        RefreshProfileDropdown()
+    end
 
     -- â”€â”€ Footer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     local footer = CreateFrame("Frame", nil, configFrame)
